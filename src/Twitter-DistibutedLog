@@ -1,0 +1,49 @@
+1. why need distributed log?
+   日志已经成为一种有效的数据结构，用来解决很多分布式系统的问题，比如，多个请求在不同节点修改某个
+   变量，(a = 3: server1: a -> 4, server2: a -> 5), 如何用日志和cas保证最终一致性。
+   解决方案：使用日志可以序列化所有的请求，所有节点从日志中读取操作改变变量状态。在日志中server1
+   先操作，a -> 4, server2再操作是a不再是3，失败。
+
+   日志 --> 序列化操作 pub/sub
+
+2. what should the log satisfied?
+   1）存在log中的数据需要持久化，容忍宕机，避免数据丢失
+   2）分布式，提高可用性
+   3）数据一致性，保证机器间的数据一致
+
+3. Twitter distributed log --> low latency，high throughput
+   日志系统主要有三个核心负载：write， tail read， catch-up read
+   write:将数据追加在文件末尾  (low latency)
+   tail read:从日志尾读最新的内容  (low latency)
+   catch-up read:客户重启，从很早的位置开始读数据，需要读大量的数据，以尽快追上tail (high throughput)
+   catch-up每次大量的操作会抢占资源，影响write和tail read的性能
+
+4. 如何做到low latency，high throughput?
+   Twitter采用bookKeeper实现I/O分离，并行复制，一致性模型
+   1）并行复制 （server，msg）
+   bookie在启动时向zookeeper注册节点，client通过zookeeper发现可用的bookie
+
+   写请求：
+   按照策略选出几台bookie，并发的向这几台bookie写消息，每条消息会注册entryID，以流水线的方式发送
+   即发送第N+1条时不必等待第N条返回，各消息间的顺序通过entryID保证
+   多数bookie返回确认，则代表成功，如果活的bookie少于返回的阈值，从bookie pool里选新bookie代替
+   宕机的bookie
+
+   2) 一致性
+   把请求想成一把尺子，每个写请求都会有ID，用LAP(last add push)记录ID位置，所有的写都是异步的，
+   LAC(last add commit)作为确认指针，记录当前已确认的最后一条消息的ID。
+   读请求：
+   每次只能读取小于等于LAC的消息，保证读正确。LAC和LAP之间的gap就是延迟。
+   写请求：
+   fencing机制。有多个的时候kill对方，只剩下一个。保证只有一个写者
+   3）I/O分离
+   写用LAP，读用LAC
+
+   读请求：
+   请求首先发给第一个节点，等待一定时间无回复，发给第二个节点，同时等待1,2的回复...
+
+   distributed log就是由多个bookKeeper组成
+   日志过多时删除，两种策略：
+   1） 精确删除：严格控制删除位置
+   2） 按时间过期删除
+
